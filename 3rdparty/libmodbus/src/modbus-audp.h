@@ -16,8 +16,8 @@
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA
  */
 
-#ifndef MODBUS_ATCP_H
-#define MODBUS_ATCP_H
+#ifndef MODBUS_AUDP_H
+#define MODBUS_AUDP_H
 
 #include "modbus.h"
 
@@ -43,22 +43,22 @@ MODBUS_BEGIN_DECLS
 #endif
 #endif
 
-#define MODBUS_TCP_DEFAULT_PORT   502
-#define MODBUS_TCP_SLAVE         0xFF
+#define MODBUS_AUDP_DEFAULT_PORT   502
+#define MODBUS_AUDP_SLAVE         0xFF
 
 /* Modbus_Application_Protocol_V1_1b.pdf Chapter 4 Section 1 Page 5
  * TCP MODBUS ADU = 253 bytes + MBAP (7 bytes) = 260 bytes
  */
-#define MODBUS_TCP_MAX_ADU_LENGTH  260
+#define MODBUS_AUDP_MAX_ADU_LENGTH  260
 
-MODBUS_API modbus_t* modbus_new_atcp(const char *ip_address, int port);
-MODBUS_API int modbus_atcp_listen(modbus_t *ctx, int nb_connection);
-MODBUS_API int modbus_atcp_accept(modbus_t *ctx, int *s);
+MODBUS_API modbus_t* modbus_new_audp(const char *ip_address, int port);
+MODBUS_API int modbus_audp_listen(modbus_t *ctx, int nb_connection);
+MODBUS_API int modbus_audp_accept(modbus_t *ctx, int *s);
 
-MODBUS_API modbus_t* modbus_new_atcp_pi(const char *node, const char *service);
-MODBUS_API int modbus_atcp_pi_listen(modbus_t *ctx, int nb_connection);
-MODBUS_API int modbus_atcp_pi_accept(modbus_t *ctx, int *s);
+MODBUS_API modbus_t* modbus_new_audp_pi(const char *node, const char *service);
+MODBUS_API int modbus_audp_pi_listen(modbus_t *ctx, int nb_connection);
+MODBUS_API int modbus_audp_pi_accept(modbus_t *ctx, int *s);
 
 MODBUS_END_DECLS
 
-#endif /* MODBUS_ATCP_H */
+#endif /* MODBUS_AUDP_H */

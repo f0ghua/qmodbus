@@ -18,7 +18,8 @@ SOURCES += src/main.cpp \
     src/serialsettingswidget.cpp \
     src/tcpipsettingswidget.cpp \
     src/ipaddressctrl.cpp \
-    src/iplineedit.cpp
+    src/iplineedit.cpp \
+    3rdparty/libmodbus/src/modbus-audp.c
 
 HEADERS += src/mainwindow.h \
     src/BatchProcessor.h \
@@ -29,7 +30,9 @@ HEADERS += src/mainwindow.h \
     src/imodbus.h \
     src/tcpipsettingswidget.h \
     src/ipaddressctrl.h \
-    src/iplineedit.h
+    src/iplineedit.h \
+    3rdparty/libmodbus/src/modbus-audp.h \
+    3rdparty/libmodbus/src/modbus-audp-private.h
 
 INCLUDEPATH += 3rdparty/libmodbus \
                3rdparty/libmodbus/src \

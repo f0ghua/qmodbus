@@ -61,12 +61,15 @@
 #endif
 
 #include "modbus-private.h"
+#include "modbus-ascii-private.h"
 
-#include "modbus-atcp.h"
-#include "modbus-atcp-private.h"
+#include "modbus-audp.h"
+#include "modbus-audp-private.h"
+
+static int _modbus_audp_flush(modbus_t *ctx);
 
 #ifdef OS_WIN32
-static int _modbus_atcp_init_win32(void)
+static int _modbus_audp_init_win32(void)
 {
     /* Initialise Windows Socket API */
     WSADATA wsaData;
@@ -99,130 +102,250 @@ static int _modbus_set_slave(modbus_t *ctx, int slave)
 }
 
 /* Builds a TCP request header */
-static int _modbus_atcp_build_request_basis(modbus_t *ctx, int function,
+static int _modbus_audp_build_request_basis(modbus_t *ctx, int function,
                                            int addr, int nb,
                                            uint8_t *req)
 {
-    modbus_tcp_t *ctx_tcp = ctx->backend_data;
+    modbus_audp_t *ctx_audp = ctx->backend_data;
 
-    /* Increase transaction ID */
-    if (ctx_tcp->t_id < UINT16_MAX)
-        ctx_tcp->t_id++;
-    else
-        ctx_tcp->t_id = 0;
-    req[0] = ctx_tcp->t_id >> 8;
-    req[1] = ctx_tcp->t_id & 0x00ff;
+    //assert(ctx->slave != -1);
+    req[0] = ':';
+    req[1] = ctx->slave;
+    req[2] = function;
+    req[3] = addr >> 8;
+    req[4] = addr & 0x00ff;
+    req[5] = nb >> 8;
+    req[6] = nb & 0x00ff;
 
-    /* Protocol Modbus */
-    req[2] = 0;
-    req[3] = 0;
-
-    /* Length will be defined later by set_req_length_tcp at offsets 4
-       and 5 */
-
-    req[6] = ctx->slave;
-    req[7] = function;
-    req[8] = addr >> 8;
-    req[9] = addr & 0x00ff;
-    req[10] = nb >> 8;
-    req[11] = nb & 0x00ff;
-
-    return _MODBUS_TCP_PRESET_REQ_LENGTH;
+    return _MODBUS_AUDP_PRESET_REQ_LENGTH;
 }
 
 /* Builds a TCP response header */
-static int _modbus_atcp_build_response_basis(sft_t *sft, uint8_t *rsp)
+static int _modbus_audp_build_response_basis(sft_t *sft, uint8_t *rsp)
 {
-    /* Extract from MODBUS Messaging on TCP/IP Implementation
-       Guide V1.0b (page 23/46):
-       The transaction identifier is used to associate the future
-       response with the request. */
-    rsp[0] = sft->t_id >> 8;
-    rsp[1] = sft->t_id & 0x00ff;
+    /* In this case, the slave is certainly valid because a check is already
+     * done in _modbus_ascii_listen */
+    rsp[0] = sft->slave;
+    rsp[1] = sft->function;
 
-    /* Protocol Modbus */
-    rsp[2] = 0;
-    rsp[3] = 0;
-
-    /* Length will be set later by send_msg (4 and 5) */
-
-    /* The slave ID is copied from the indication */
-    rsp[6] = sft->slave;
-    rsp[7] = sft->function;
-
-    return _MODBUS_TCP_PRESET_RSP_LENGTH;
+    return _MODBUS_AUDP_PRESET_RSP_LENGTH;
 }
 
-
-static int _modbus_atcp_prepare_response_tid(const uint8_t *req, int *req_length)
+static int _modbus_audp_prepare_response_tid(const uint8_t *req, int *req_length)
 {
-    return (req[0] << 8) + req[1];
+    (*req_length) -= _MODBUS_ASCII_CHECKSUM_LENGTH;
+    /* No TID */
+    return 0;
 }
 
-static int _modbus_atcp_send_msg_pre(uint8_t *req, int req_length)
+static uint8_t lcr8(uint8_t *buffer, uint16_t buffer_length)
 {
-    /* Substract the header length to the message length */
-    int mbap_length = req_length - 6;
+    uint8_t lcr = 0;
 
-    req[4] = mbap_length >> 8;
-    req[5] = mbap_length & 0x00FF;
+    /* pass through message buffer */
+    while (buffer_length--) {
+        lcr += *buffer++; /* calculate the lcr  */
+    }
+
+    return -lcr; /* The sume of all raw databytes is 0 */
+}
+
+static int _modbus_audp_send_msg_pre(uint8_t *req, int req_length)
+{
+    uint8_t lcr = lcr8(req + 1, req_length - 1);
+    req[req_length++] = lcr;
+    req[req_length++] = '\r';
+    req[req_length++] = '\n';
 
     return req_length;
 }
 
-static ssize_t _modbus_atcp_send(modbus_t *ctx, const uint8_t *req, int req_length)
+static char nibble_to_hex_ascii(uint8_t nibble)
 {
-    /* MSG_NOSIGNAL
-       Requests not to send SIGPIPE on errors on stream oriented
-       sockets when the other end breaks the connection.  The EPIPE
-       error is still returned. */
-    return send(ctx->s, (const char*)req, req_length, MSG_NOSIGNAL);
+    char c;
+    if (nibble < 10) {
+        c = nibble + '0';
+    } else {
+        c = nibble - 10 + 'A';
+    }
+    return c;
 }
 
-static int _modbus_atcp_receive(modbus_t *ctx, uint8_t *req) {
-    return _modbus_receive_msg(ctx, req, MSG_INDICATION);
-}
-
-static ssize_t _modbus_atcp_recv(modbus_t *ctx, uint8_t *rsp, int rsp_length) {
-    return recv(ctx->s, (char *)rsp, rsp_length, 0);
-}
-
-static int _modbus_atcp_check_integrity(modbus_t *ctx, uint8_t *msg, const int msg_length)
+static uint8_t hex_ascii_to_nibble(char digit)
 {
-    return msg_length;
+    if (digit >= '0' && digit <= '9' ) {
+        return digit - '0';
+    } else if (digit >= 'A' && digit <= 'F' ) {
+        return digit - 'A' + 10;
+    } else if (digit >= 'a' && digit <= 'f' ) {
+        return digit - 'a' + 10;
+    }
+    return 0xff;
 }
 
-static int _modbus_atcp_pre_check_confirmation(modbus_t *ctx, const uint8_t *req,
-                                              const uint8_t *rsp, int rsp_length)
+static ssize_t _modbus_audp_send(modbus_t *ctx, const uint8_t *req, int req_length)
 {
-    /* Check transaction ID */
-    if (req[0] != rsp[0] || req[1] != rsp[1]) {
+    int i;
+    int k;
+    char ascii_req[3 + (MODBUS_ASCII_MAX_ADU_LENGTH * 2)];
+    int send_length;
+
+    ascii_req[0] = req[0]; // ':'
+    k = 1;
+    for (i = 1; i < req_length - 2; ++i) {
+        ascii_req[k++] = nibble_to_hex_ascii(req[i] >> 4);
+        ascii_req[k++] = nibble_to_hex_ascii(req[i] & 0x0f);
+    }
+    ascii_req[k++] = req[i++]; // '\r'
+    ascii_req[k++] = req[i++]; // '\n'
+    ascii_req[k] = '\0';
+
+    struct sockaddr_in *saddr_p = &((modbus_audp_t *)ctx->backend_data)->addr;
+    send_length = sendto(ctx->s, (const char*)ascii_req, k, MSG_NOSIGNAL,
+		(struct sockaddr *)saddr_p, sizeof(struct sockaddr));
+    send_length = ((send_length - 3) / 2) + 3;
+
+    return send_length;
+}
+
+static int _modbus_audp_receive(modbus_t *ctx, uint8_t *req)
+{
+    int rc;
+    modbus_ascii_t *ctx_ascii = ctx->backend_data;
+
+    if (ctx_ascii->confirmation_to_ignore) {
+        _modbus_receive_msg(ctx, req, MSG_CONFIRMATION);
+        /* Ignore errors and reset the flag */
+        ctx_ascii->confirmation_to_ignore = FALSE;
+        rc = 0;
         if (ctx->debug) {
-            fprintf(stderr, "Invalid transaction ID received 0x%X (not 0x%X)\n",
-                    (rsp[0] << 8) + rsp[1], (req[0] << 8) + req[1]);
+            printf("Confirmation to ignore\n");
         }
-        errno = EMBBADDATA;
-        return -1;
+    } else {
+        rc = _modbus_receive_msg(ctx, req, MSG_INDICATION);
+        if (rc == 0) {
+            /* The next expected message is a confirmation to ignore */
+            ctx_ascii->confirmation_to_ignore = TRUE;
+        }
+    }
+    return rc;
+}
+
+static ssize_t _modbus_audp_recv(modbus_t *ctx, uint8_t *rsp, int rsp_length)
+{
+    socklen_t fromlen;
+    struct sockaddr_in caller;
+    uint8_t *rsp_start = rsp;
+    int i, rcvlen, readed;
+	char *rx_buff;
+
+    modbus_audp_t *ctx_udp = ctx->backend_data;
+
+    if (ctx_udp->rxlen < rsp_length) {
+        rx_buff = ctx_udp->rx_buff + ctx_udp->rxlen;
+        fromlen = sizeof(struct sockaddr);
+        rcvlen = recvfrom(ctx->s, rx_buff, sizeof(ctx_udp->rx_buff)-ctx_udp->rxlen, 0,
+            (struct sockaddr *)&caller, &fromlen);
+
+        if (rcvlen <= 0) {
+            printf("recvfrom() failed with error code : %d" , WSAGetLastError());
+            return ctx_udp->rxlen;
+        }
+
+        ctx_udp->rxlen += rcvlen;
     }
 
-    /* Check protocol ID */
-    if (rsp[2] != 0x0 && rsp[3] != 0x0) {
-        if (ctx->debug) {
-            fprintf(stderr, "Invalid protocol ID received 0x%X (not 0x0)\n",
-                    (rsp[2] << 8) + rsp[3]);
+    int j = 0; // ASCII buffer index
+    for (i = 0; i < rsp_length; i++) {
+        char char_resp;
+        char_resp = ctx_udp->rx_buff[j++];
+        if (char_resp == ':' || char_resp == '\r' || char_resp == '\n') {
+            *rsp = char_resp;
+        } else {
+            uint8_t nibble_resp;
+            nibble_resp = hex_ascii_to_nibble(char_resp);
+            *rsp = nibble_resp << 4;
+            char_resp = ctx_udp->rx_buff[j++];
+            nibble_resp = hex_ascii_to_nibble(char_resp);
+            *rsp |= nibble_resp;
         }
-        errno = EMBBADDATA;
+        rsp++;
+    }
+
+	readed = rsp - rsp_start;
+    ctx_udp->rxlen -= (j);
+
+    memmove(ctx_udp->rx_buff, ctx_udp->rx_buff+j, ctx_udp->rxlen);
+	
+    return readed;
+}
+
+static int _modbus_audp_check_integrity(modbus_t *ctx, uint8_t *msg, const int msg_length)
+{
+    uint8_t lcr;
+    char colon = msg[0];
+    int slave = msg[1];
+
+    /* check for leading colon*/
+    if (colon != ':') {
+        if (ctx->debug) {
+            printf("No leading colon\n");
+        }
+        /* Following call to check_confirmation handles this error */
+        return 0;
+    }
+
+    /* Filter on the Modbus unit identifier (slave) in ascii mode to avoid useless
+     * CRC computing. */
+    if (slave != ctx->slave && slave != MODBUS_BROADCAST_ADDRESS) {
+        if (ctx->debug) {
+            printf("Request for slave %d ignored (not %d)\n", slave, ctx->slave);
+        }
+        /* Following call to check_confirmation handles this error */
+        return 0;
+    }
+
+    lcr = lcr8(msg + 1, msg_length - 3); /* strip ":" and "\r\n" */
+    /* Check CRC of msg */
+    if (lcr == 0) {
+        return msg_length;
+    } else {
+        if (ctx->debug) {
+            fprintf(stderr, "ERROR lcr received %0X != 0\n", lcr);
+        }
+
+        if (ctx->error_recovery & MODBUS_ERROR_RECOVERY_PROTOCOL) {
+            _modbus_audp_flush(ctx);
+        }
+        errno = EMBBADCRC;
+        return -1;
+    }
+}
+
+static int _modbus_audp_pre_check_confirmation(modbus_t *ctx, const uint8_t *req,
+                                              const uint8_t *rsp, int rsp_length)
+{
+    /* Check responding slave is the slave we requested (except for broadcast
+     * request) */
+    if (req[1] != rsp[1] && req[1] != MODBUS_BROADCAST_ADDRESS) {
+        if (ctx->debug) {
+            fprintf(stderr,
+                    "The responding slave %d isn't the requested slave %d\n",
+                    rsp[1], req[1]);
+        }
+        errno = EMBBADSLAVE;
         return -1;
     }
 
     return 0;
 }
 
-static int _modbus_atcp_set_ipv4_options(int s)
+static int _modbus_audp_set_ipv4_options(int s)
 {
     int rc;
     int option;
 
+#ifdef TODO_FINISHED
     /* Set the TCP no delay flag */
     /* SOL_TCP = IPPROTO_TCP */
     option = 1;
@@ -261,6 +384,12 @@ static int _modbus_atcp_set_ipv4_options(int s)
         return -1;
     }
 #endif
+#endif
+
+    struct timeval read_timeout;
+    read_timeout.tv_sec = 0;
+    read_timeout.tv_usec = 10;
+    setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, &read_timeout, sizeof(read_timeout));
 
     return 0;
 }
@@ -306,17 +435,17 @@ static int _connect(int sockfd, const struct sockaddr *addr, socklen_t addrlen,
     return rc;
 }
 
-/* Establishes a modbus TCP connection with a Modbus server. */
-static int _modbus_atcp_connect(modbus_t *ctx)
+/* Establishes a modbus UDP connection with a Modbus server. */
+static int _modbus_audp_connect(modbus_t *ctx)
 {
     int rc;
     /* Specialized version of sockaddr for Internet socket address (same size) */
     struct sockaddr_in addr;
-    modbus_tcp_t *ctx_tcp = ctx->backend_data;
-    int flags = SOCK_STREAM;
+    modbus_audp_t *ctx_udp = ctx->backend_data;
+    int flags = SOCK_DGRAM;
 
 #ifdef OS_WIN32
-    if (_modbus_atcp_init_win32() == -1) {
+    if (_modbus_audp_init_win32() == -1) {
         return -1;
     }
 #endif
@@ -329,12 +458,12 @@ static int _modbus_atcp_connect(modbus_t *ctx)
     flags |= SOCK_NONBLOCK;
 #endif
 
-    ctx->s = socket(PF_INET, flags, 0);
+    ctx->s = socket(PF_INET, flags, IPPROTO_UDP);
     if (ctx->s == -1) {
         return -1;
     }
 
-    rc = _modbus_atcp_set_ipv4_options(ctx->s);
+    rc = _modbus_audp_set_ipv4_options(ctx->s);
     if (rc == -1) {
         close(ctx->s);
         ctx->s = -1;
@@ -342,33 +471,28 @@ static int _modbus_atcp_connect(modbus_t *ctx)
     }
 
     if (ctx->debug) {
-        printf("Connecting to %s:%d\n", ctx_tcp->ip, ctx_tcp->port);
+        printf("Connecting to %s:%d\n", ctx_udp->ip, ctx_udp->port);
     }
 
-    addr.sin_family = AF_INET;
-    addr.sin_port = htons(ctx_tcp->port);
-    addr.sin_addr.s_addr = inet_addr(ctx_tcp->ip);
-    rc = _connect(ctx->s, (struct sockaddr *)&addr, sizeof(addr), &ctx->response_timeout);
-    if (rc == -1) {
-        close(ctx->s);
-        ctx->s = -1;
-        return -1;
-    }
+	memset((char *) &ctx_udp->addr, 0, sizeof(ctx_udp->addr));
+    ctx_udp->addr.sin_family = AF_INET;
+    ctx_udp->addr.sin_port = htons(ctx_udp->port);
+    ctx_udp->addr.sin_addr.s_addr = inet_addr(ctx_udp->ip);
 
     return 0;
 }
 
 /* Establishes a modbus TCP PI connection with a Modbus server. */
-static int _modbus_atcp_pi_connect(modbus_t *ctx)
+static int _modbus_audp_pi_connect(modbus_t *ctx)
 {
     int rc;
     struct addrinfo *ai_list;
     struct addrinfo *ai_ptr;
     struct addrinfo ai_hints;
-    modbus_tcp_pi_t *ctx_tcp_pi = ctx->backend_data;
+    modbus_audp_pi_t *ctx_audp_pi = ctx->backend_data;
 
 #ifdef OS_WIN32
-    if (_modbus_atcp_init_win32() == -1) {
+    if (_modbus_audp_init_win32() == -1) {
         return -1;
     }
 #endif
@@ -378,13 +502,13 @@ static int _modbus_atcp_pi_connect(modbus_t *ctx)
     ai_hints.ai_flags |= AI_ADDRCONFIG;
 #endif
     ai_hints.ai_family = AF_UNSPEC;
-    ai_hints.ai_socktype = SOCK_STREAM;
+    ai_hints.ai_socktype = SOCK_DGRAM;
     ai_hints.ai_addr = NULL;
     ai_hints.ai_canonname = NULL;
     ai_hints.ai_next = NULL;
 
     ai_list = NULL;
-    rc = getaddrinfo(ctx_tcp_pi->node, ctx_tcp_pi->service,
+    rc = getaddrinfo(ctx_audp_pi->node, ctx_audp_pi->service,
                      &ai_hints, &ai_list);
     if (rc != 0) {
         if (ctx->debug) {
@@ -411,18 +535,18 @@ static int _modbus_atcp_pi_connect(modbus_t *ctx)
             continue;
 
         if (ai_ptr->ai_family == AF_INET)
-            _modbus_atcp_set_ipv4_options(s);
+            _modbus_audp_set_ipv4_options(s);
 
         if (ctx->debug) {
-            printf("Connecting to [%s]:%s\n", ctx_tcp_pi->node, ctx_tcp_pi->service);
+            printf("Connecting to [%s]:%s\n", ctx_audp_pi->node, ctx_audp_pi->service);
         }
-
+#ifdef TODO_FINISHED
         rc = _connect(s, ai_ptr->ai_addr, ai_ptr->ai_addrlen, &ctx->response_timeout);
         if (rc == -1) {
             close(s);
             continue;
         }
-
+#endif
         ctx->s = s;
         break;
     }
@@ -437,7 +561,7 @@ static int _modbus_atcp_pi_connect(modbus_t *ctx)
 }
 
 /* Closes the network connection and socket in TCP mode */
-static void _modbus_atcp_close(modbus_t *ctx)
+static void _modbus_audp_close(modbus_t *ctx)
 {
     if (ctx->s != -1) {
         shutdown(ctx->s, SHUT_RDWR);
@@ -446,14 +570,14 @@ static void _modbus_atcp_close(modbus_t *ctx)
     }
 }
 
-static int _modbus_atcp_flush(modbus_t *ctx)
+static int _modbus_audp_flush(modbus_t *ctx)
 {
     int rc;
     int rc_sum = 0;
 
     do {
         /* Extract the garbage from the socket */
-        char devnull[MODBUS_TCP_MAX_ADU_LENGTH];
+        char devnull[MODBUS_AUDP_MAX_ADU_LENGTH];
 #ifndef OS_WIN32
         rc = recv(ctx->s, devnull, MODBUS_TCP_MAX_ADU_LENGTH, MSG_DONTWAIT);
 #else
@@ -472,39 +596,43 @@ static int _modbus_atcp_flush(modbus_t *ctx)
 
         if (rc == 1) {
             /* There is data to flush */
-            rc = recv(ctx->s, devnull, MODBUS_TCP_MAX_ADU_LENGTH, 0);
+            socklen_t fromlen = sizeof(struct sockaddr);
+            struct sockaddr_in *saddr_p;
+            saddr_p = &((modbus_audp_t *)ctx->backend_data)->addr;
+            rc = recvfrom(ctx->s, devnull, MODBUS_AUDP_MAX_ADU_LENGTH, 0,
+                          (struct sockaddr *)saddr_p, &fromlen);
         }
 #endif
         if (rc > 0) {
             rc_sum += rc;
         }
-    } while (rc == MODBUS_TCP_MAX_ADU_LENGTH);
+    } while (rc == MODBUS_AUDP_MAX_ADU_LENGTH);
 
     return rc_sum;
 }
 
 /* Listens for any request from one or many modbus masters in TCP */
-int modbus_atcp_listen(modbus_t *ctx, int nb_connection)
+int modbus_audp_listen(modbus_t *ctx, int nb_connection)
 {
     int new_s;
     int yes;
     struct sockaddr_in addr;
-    modbus_tcp_t *ctx_tcp;
+    modbus_audp_t *ctx_audp;
 
     if (ctx == NULL) {
         errno = EINVAL;
         return -1;
     }
 
-    ctx_tcp = ctx->backend_data;
+    ctx_audp = ctx->backend_data;
 
 #ifdef OS_WIN32
-    if (_modbus_atcp_init_win32() == -1) {
+    if (_modbus_audp_init_win32() == -1) {
         return -1;
     }
 #endif
 
-    new_s = socket(PF_INET, SOCK_STREAM, IPPROTO_TCP);
+    new_s = socket(PF_INET, SOCK_DGRAM, IPPROTO_UDP);
     if (new_s == -1) {
         return -1;
     }
@@ -519,28 +647,30 @@ int modbus_atcp_listen(modbus_t *ctx, int nb_connection)
     memset(&addr, 0, sizeof(addr));
     addr.sin_family = AF_INET;
     /* If the modbus port is < to 1024, we need the setuid root. */
-    addr.sin_port = htons(ctx_tcp->port);
-    if (ctx_tcp->ip[0] == '0') {
+    addr.sin_port = htons(ctx_audp->port);
+    if (ctx_audp->ip[0] == '0') {
         /* Listen any addresses */
         addr.sin_addr.s_addr = htonl(INADDR_ANY);
     } else {
         /* Listen only specified IP address */
-        addr.sin_addr.s_addr = inet_addr(ctx_tcp->ip);
+        addr.sin_addr.s_addr = inet_addr(ctx_audp->ip);
     }
     if (bind(new_s, (struct sockaddr *)&addr, sizeof(addr)) == -1) {
         close(new_s);
         return -1;
     }
 
+#ifdef TODO_FINISHED
     if (listen(new_s, nb_connection) == -1) {
         close(new_s);
         return -1;
     }
+#endif
 
     return new_s;
 }
 
-int modbus_atcp_pi_listen(modbus_t *ctx, int nb_connection)
+int modbus_audp_pi_listen(modbus_t *ctx, int nb_connection)
 {
     int rc;
     struct addrinfo *ai_list;
@@ -549,31 +679,31 @@ int modbus_atcp_pi_listen(modbus_t *ctx, int nb_connection)
     const char *node;
     const char *service;
     int new_s;
-    modbus_tcp_pi_t *ctx_tcp_pi;
+    modbus_audp_pi_t *ctx_audp_pi;
 
     if (ctx == NULL) {
         errno = EINVAL;
         return -1;
     }
 
-    ctx_tcp_pi = ctx->backend_data;
+    ctx_audp_pi = ctx->backend_data;
 
 #ifdef OS_WIN32
-    if (_modbus_atcp_init_win32() == -1) {
+    if (_modbus_audp_init_win32() == -1) {
         return -1;
     }
 #endif
 
-    if (ctx_tcp_pi->node[0] == 0) {
+    if (ctx_audp_pi->node[0] == 0) {
         node = NULL; /* == any */
     } else {
-        node = ctx_tcp_pi->node;
+        node = ctx_audp_pi->node;
     }
 
-    if (ctx_tcp_pi->service[0] == 0) {
+    if (ctx_audp_pi->service[0] == 0) {
         service = "502";
     } else {
-        service = ctx_tcp_pi->service;
+        service = ctx_audp_pi->service;
     }
 
     memset(&ai_hints, 0, sizeof (ai_hints));
@@ -652,7 +782,7 @@ int modbus_atcp_pi_listen(modbus_t *ctx, int nb_connection)
     return new_s;
 }
 
-int modbus_atcp_accept(modbus_t *ctx, int *s)
+int modbus_audp_accept(modbus_t *ctx, int *s)
 {
     struct sockaddr_in addr;
     socklen_t addrlen;
@@ -684,7 +814,7 @@ int modbus_atcp_accept(modbus_t *ctx, int *s)
     return ctx->s;
 }
 
-int modbus_atcp_pi_accept(modbus_t *ctx, int *s)
+int modbus_audp_pi_accept(modbus_t *ctx, int *s)
 {
     struct sockaddr_storage addr;
     socklen_t addrlen;
@@ -713,9 +843,14 @@ int modbus_atcp_pi_accept(modbus_t *ctx, int *s)
     return ctx->s;
 }
 
-static int _modbus_atcp_select(modbus_t *ctx, fd_set *rset, struct timeval *tv, int length_to_read)
+static int _modbus_audp_select(modbus_t *ctx, fd_set *rset, struct timeval *tv, int length_to_read)
 {
     int s_rc;
+    modbus_audp_t *ctx_udp = ctx->backend_data;
+
+    if (ctx_udp->rxlen > 0)
+        return 1;
+
     while ((s_rc = select(ctx->s+1, rset, NULL, NULL, tv)) == -1) {
         if (errno == EINTR) {
             if (ctx->debug) {
@@ -737,60 +872,60 @@ static int _modbus_atcp_select(modbus_t *ctx, fd_set *rset, struct timeval *tv, 
     return s_rc;
 }
 
-static void _modbus_atcp_free(modbus_t *ctx) {
+static void _modbus_audp_free(modbus_t *ctx) {
     free(ctx->backend_data);
     free(ctx);
 }
 
-const modbus_backend_t _modbus_atcp_backend = {
-    _MODBUS_BACKEND_TYPE_ATCP,
-    _MODBUS_TCP_HEADER_LENGTH,
-    _MODBUS_TCP_CHECKSUM_LENGTH,
-    MODBUS_TCP_MAX_ADU_LENGTH,
+const modbus_backend_t _modbus_audp_backend = {
+    _MODBUS_BACKEND_TYPE_AUDP,
+    _MODBUS_AUDP_HEADER_LENGTH,
+    _MODBUS_AUDP_CHECKSUM_LENGTH,
+    MODBUS_AUDP_MAX_ADU_LENGTH,
     _modbus_set_slave,
-    _modbus_atcp_build_request_basis,
-    _modbus_atcp_build_response_basis,
-    _modbus_atcp_prepare_response_tid,
-    _modbus_atcp_send_msg_pre,
-    _modbus_atcp_send,
-    _modbus_atcp_receive,
-    _modbus_atcp_recv,
-    _modbus_atcp_check_integrity,
-    _modbus_atcp_pre_check_confirmation,
-    _modbus_atcp_connect,
-    _modbus_atcp_close,
-    _modbus_atcp_flush,
-    _modbus_atcp_select,
-    _modbus_atcp_free
+    _modbus_audp_build_request_basis,
+    _modbus_audp_build_response_basis,
+    _modbus_audp_prepare_response_tid,
+    _modbus_audp_send_msg_pre,
+    _modbus_audp_send,
+    _modbus_audp_receive,
+    _modbus_audp_recv,
+    _modbus_audp_check_integrity,
+    _modbus_audp_pre_check_confirmation,
+    _modbus_audp_connect,
+    _modbus_audp_close,
+    _modbus_audp_flush,
+    _modbus_audp_select,
+    _modbus_audp_free
 };
 
 
-const modbus_backend_t _modbus_atcp_pi_backend = {
-    _MODBUS_BACKEND_TYPE_ATCP,
-    _MODBUS_TCP_HEADER_LENGTH,
-    _MODBUS_TCP_CHECKSUM_LENGTH,
-    MODBUS_TCP_MAX_ADU_LENGTH,
+const modbus_backend_t _modbus_audp_pi_backend = {
+    _MODBUS_BACKEND_TYPE_AUDP,
+    _MODBUS_AUDP_HEADER_LENGTH,
+    _MODBUS_AUDP_CHECKSUM_LENGTH,
+    MODBUS_AUDP_MAX_ADU_LENGTH,
     _modbus_set_slave,
-    _modbus_atcp_build_request_basis,
-    _modbus_atcp_build_response_basis,
-    _modbus_atcp_prepare_response_tid,
-    _modbus_atcp_send_msg_pre,
-    _modbus_atcp_send,
-    _modbus_atcp_receive,
-    _modbus_atcp_recv,
-    _modbus_atcp_check_integrity,
-    _modbus_atcp_pre_check_confirmation,
-    _modbus_atcp_pi_connect,
-    _modbus_atcp_close,
-    _modbus_atcp_flush,
-    _modbus_atcp_select,
-    _modbus_atcp_free
+    _modbus_audp_build_request_basis,
+    _modbus_audp_build_response_basis,
+    _modbus_audp_prepare_response_tid,
+    _modbus_audp_send_msg_pre,
+    _modbus_audp_send,
+    _modbus_audp_receive,
+    _modbus_audp_recv,
+    _modbus_audp_check_integrity,
+    _modbus_audp_pre_check_confirmation,
+    _modbus_audp_pi_connect,
+    _modbus_audp_close,
+    _modbus_audp_flush,
+    _modbus_audp_select,
+    _modbus_audp_free
 };
 
-modbus_t* modbus_new_atcp(const char *ip, int port)
+modbus_t* modbus_new_audp(const char *ip, int port)
 {
     modbus_t *ctx;
-    modbus_tcp_t *ctx_tcp;
+    modbus_audp_t *ctx_audp;
     size_t dest_size;
     size_t ret_size;
 
@@ -813,14 +948,14 @@ modbus_t* modbus_new_atcp(const char *ip, int port)
     /* Could be changed after to reach a remote serial Modbus device */
     ctx->slave = MODBUS_TCP_SLAVE;
 
-    ctx->backend = &(_modbus_atcp_backend);
+    ctx->backend = &(_modbus_audp_backend);
 
-    ctx->backend_data = (modbus_tcp_t *) malloc(sizeof(modbus_tcp_t));
-    ctx_tcp = (modbus_tcp_t *)ctx->backend_data;
+    ctx->backend_data = (modbus_audp_t *) malloc(sizeof(modbus_audp_t));
+    ctx_audp = (modbus_audp_t *)ctx->backend_data;
 
     if (ip != NULL) {
         dest_size = sizeof(char) * 16;
-        ret_size = strlcpy(ctx_tcp->ip, ip, dest_size);
+        ret_size = strlcpy(ctx_audp->ip, ip, dest_size);
         if (ret_size == 0) {
             fprintf(stderr, "The IP string is empty\n");
             modbus_free(ctx);
@@ -835,19 +970,20 @@ modbus_t* modbus_new_atcp(const char *ip, int port)
             return NULL;
         }
     } else {
-        ctx_tcp->ip[0] = '0';
+        ctx_audp->ip[0] = '0';
     }
-    ctx_tcp->port = port;
-    ctx_tcp->t_id = 0;
+    ctx_audp->port = port;
+    ctx_audp->t_id = 0;
+	ctx_audp->rxlen = 0;
 
     return ctx;
 }
 
 
-modbus_t* modbus_new_atcp_pi(const char *node, const char *service)
+modbus_t* modbus_new_audp_pi(const char *node, const char *service)
 {
     modbus_t *ctx;
-    modbus_tcp_pi_t *ctx_tcp_pi;
+    modbus_audp_pi_t *ctx_audp_pi;
     size_t dest_size;
     size_t ret_size;
 
@@ -857,17 +993,17 @@ modbus_t* modbus_new_atcp_pi(const char *node, const char *service)
     /* Could be changed after to reach a remote serial Modbus device */
     ctx->slave = MODBUS_TCP_SLAVE;
 
-    ctx->backend = &(_modbus_atcp_pi_backend);
+    ctx->backend = &(_modbus_audp_pi_backend);
 
-    ctx->backend_data = (modbus_tcp_pi_t *) malloc(sizeof(modbus_tcp_pi_t));
-    ctx_tcp_pi = (modbus_tcp_pi_t *)ctx->backend_data;
+    ctx->backend_data = (modbus_audp_pi_t *) malloc(sizeof(modbus_audp_pi_t));
+    ctx_audp_pi = (modbus_audp_pi_t *)ctx->backend_data;
 
     if (node == NULL) {
         /* The node argument can be empty to indicate any hosts */
-        ctx_tcp_pi->node[0] = '0';
+        ctx_audp_pi->node[0] = '0';
     } else {
-        dest_size = sizeof(char) * _MODBUS_TCP_PI_NODE_LENGTH;
-        ret_size = strlcpy(ctx_tcp_pi->node, node, dest_size);
+        dest_size = sizeof(char) * _MODBUS_AUDP_PI_NODE_LENGTH;
+        ret_size = strlcpy(ctx_audp_pi->node, node, dest_size);
         if (ret_size == 0) {
             fprintf(stderr, "The node string is empty\n");
             modbus_free(ctx);
@@ -884,8 +1020,8 @@ modbus_t* modbus_new_atcp_pi(const char *node, const char *service)
     }
 
     if (service != NULL) {
-        dest_size = sizeof(char) * _MODBUS_TCP_PI_SERVICE_LENGTH;
-        ret_size = strlcpy(ctx_tcp_pi->service, service, dest_size);
+        dest_size = sizeof(char) * _MODBUS_AUDP_PI_SERVICE_LENGTH;
+        ret_size = strlcpy(ctx_audp_pi->service, service, dest_size);
     } else {
         /* Empty service is not allowed, error catched below. */
         ret_size = 0;
@@ -905,7 +1041,7 @@ modbus_t* modbus_new_atcp_pi(const char *node, const char *service)
         return NULL;
     }
 
-    ctx_tcp_pi->t_id = 0;
+    ctx_audp_pi->t_id = 0;
 
     return ctx;
 }

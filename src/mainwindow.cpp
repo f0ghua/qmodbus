@@ -42,6 +42,41 @@ const int DataColumn = 2;
 
 extern MainWindow * globalMainWin;
 
+static inline quint64 byteArray2Ux(const QByteArray &ba, int len)
+{
+    quint64 v = 0;
+    for (quint8 j = 0; j < len; j++) {
+        v += ((ba.at(j)&0xFFULL)<<((len-j-1)*8));
+    }
+    return v;
+}
+
+static inline double byteArray2Double(const QByteArray &ba)
+{
+    quint64 v = byteArray2Ux(ba, sizeof(quint64));
+    return *reinterpret_cast<double *>(&v);
+}
+
+static void testUnitFunctions()
+{
+    modbus_t *audpModbus = NULL;
+    uint8_t dest[1024];
+    uint16_t * dest16 = (uint16_t *) dest;
+    int ret, number = 1;
+
+    audpModbus = modbus_new_audp("192.168.0.123", 7001);
+    modbus_set_debug(audpModbus, true);
+    if( modbus_connect( audpModbus ) == -1 )
+    {
+        qDebug() << "modbus_connect fail";
+        free(audpModbus);
+    }
+    modbus_set_slave( audpModbus, 160 );
+    ret = modbus_read_registers(audpModbus, 12, number, dest16);
+    QByteArray ba((const char *)dest, 8);
+    double b = byteArray2Double(ba);
+    qDebug() << QObject::tr("ret = %1, dest16 = %2").arg(number).arg(b, 0, 'f');
+}
 
 MainWindow::MainWindow( QWidget * _parent ) :
 	QMainWindow( _parent ),
@@ -112,6 +147,8 @@ MainWindow::MainWindow( QWidget * _parent ) :
 	m_statusTimer = new QTimer( this );
 	connect( m_statusTimer, SIGNAL(timeout()), this, SLOT(resetStatus()));
 	m_statusTimer->setSingleShot(true);
+
+    testUnitFunctions();
 }
 
 

@@ -16,41 +16,42 @@
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA
  */
 
-#ifndef MODBUS_ATCP_PRIVATE_H
-#define MODBUS_ATCP_PRIVATE_H
+#ifndef MODBUS_AUDP_PRIVATE_H
+#define MODBUS_AUDP_PRIVATE_H
 
-#define _MODBUS_ATCP_HEADER_LENGTH      7
-#define _MODBUS_ATCP_PRESET_REQ_LENGTH 12
-#define _MODBUS_ATCP_PRESET_RSP_LENGTH  8
+#define _MODBUS_AUDP_HEADER_LENGTH      2
+#define _MODBUS_AUDP_PRESET_REQ_LENGTH  7
+#define _MODBUS_AUDP_PRESET_RSP_LENGTH  2
 
-#define _MODBUS_ATCP_CHECKSUM_LENGTH    0
+#define _MODBUS_AUDP_CHECKSUM_LENGTH    3
 
 /* In both structures, the transaction ID must be placed on first position
    to have a quick access not dependant of the TCP backend */
-typedef struct _modbus_atcp {
-    /* Extract from MODBUS Messaging on TCP/IP Implementation Guide V1.0b
-       (page 23/46):
-       The transaction identifier is used to associate the future response
-       with the request. This identifier is unique on each TCP connection. */
+typedef struct _modbus_audp {
     uint16_t t_id;
     /* TCP port */
     int port;
     /* IP address */
     char ip[16];
-} modbus_tcp_t;
+	struct sockaddr_in addr;
+	char rx_buff[1024];
+	int rxlen;
+} modbus_audp_t;
 
-#define _MODBUS_ATCP_PI_NODE_LENGTH    1025
-#define _MODBUS_ATCP_PI_SERVICE_LENGTH   32
+#define _MODBUS_AUDP_PI_NODE_LENGTH    1025
+#define _MODBUS_AUDP_PI_SERVICE_LENGTH   32
 
-typedef struct _modbus_atcp_pi {
+typedef struct _modbus_audp_pi {
     /* Transaction ID */
     uint16_t t_id;
     /* TCP port */
     int port;
     /* Node */
-    char node[_MODBUS_ATCP_PI_NODE_LENGTH];
+    char node[_MODBUS_AUDP_PI_NODE_LENGTH];
     /* Service */
-    char service[_MODBUS_ATCP_PI_SERVICE_LENGTH];
-} modbus_atcp_pi_t;
+    char service[_MODBUS_AUDP_PI_SERVICE_LENGTH];
+	/* To handle many slaves on the same link */
+    int confirmation_to_ignore;
+} modbus_audp_pi_t;
 
 #endif /* MODBUS_TCP_PRIVATE_H */
