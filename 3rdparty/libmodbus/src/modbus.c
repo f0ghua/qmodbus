@@ -580,7 +580,7 @@ static int check_confirmation(modbus_t *ctx, uint8_t *req,
     }
 
     /* Check length */
-    if ((rsp_length == rsp_length_computed ||
+    if ((rsp_length == rsp_length_computed || (ctx->backend->backend_type == _MODBUS_BACKEND_TYPE_AUDP) ||
          rsp_length_computed == MSG_LENGTH_UNDEFINED) &&
         function < 0x80) {
         int req_nb_value;
@@ -619,7 +619,11 @@ static int check_confirmation(modbus_t *ctx, uint8_t *req,
         case MODBUS_FC_READ_INPUT_REGISTERS:
             /* Read functions 1 value = 2 bytes */
             req_nb_value = (req[offset + 3] << 8) + req[offset + 4];
-            rsp_nb_value = (rsp[offset + 1] / 2);
+			if (ctx->backend->backend_type == _MODBUS_BACKEND_TYPE_AUDP) {
+            	rsp_nb_value = (rsp[offset + 1] / 4);
+			} else {
+				rsp_nb_value = (rsp[offset + 1] / 2);
+			}
             break;
         case MODBUS_FC_WRITE_MULTIPLE_COILS:
         case MODBUS_FC_WRITE_MULTIPLE_REGISTERS:
