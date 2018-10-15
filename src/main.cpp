@@ -36,6 +36,8 @@ int main(int argc, char *argv[])
 	QApplication::setOrganizationDomain( "ed-chemnitz.de" );
 	QApplication::setApplicationName( "QModBus" );
 
+    qSetMessagePattern("[%{time h:mm:ss.zzz}]%{file}(%{line}): %{category} %{message}");
+
 	MainWindow w;
 	w.show();
 

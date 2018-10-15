@@ -42,6 +42,8 @@ const int DataColumn = 2;
 
 extern MainWindow * globalMainWin;
 
+#include <QtEndian>
+
 static inline quint64 byteArray2Ux(const QByteArray &ba, int len)
 {
     quint64 v = 0;
@@ -51,20 +53,26 @@ static inline quint64 byteArray2Ux(const QByteArray &ba, int len)
     return v;
 }
 
+static inline float byteArray2Float(const QByteArray &ba)
+{
+    quint32 v = byteArray2Ux(ba, sizeof(quint32));
+    return *reinterpret_cast<float *>(&v);
+}
+
 static inline double byteArray2Double(const QByteArray &ba)
 {
     quint64 v = byteArray2Ux(ba, sizeof(quint64));
     return *reinterpret_cast<double *>(&v);
 }
 
-static void testUnitFunctions()
+static void testUTEload()
 {
     modbus_t *audpModbus = NULL;
     uint8_t dest[1024];
-    uint16_t * dest16 = (uint16_t *) dest;
+    uint32_t *dest32 = (uint32_t *) dest;
     int ret, number = 1;
 
-    audpModbus = modbus_new_audp("192.168.0.123", 7001);
+    audpModbus = modbus_new_audp("127.0.0.1", 7001);
     modbus_set_debug(audpModbus, true);
     if( modbus_connect( audpModbus ) == -1 )
     {
@@ -72,10 +80,40 @@ static void testUnitFunctions()
         free(audpModbus);
     }
     modbus_set_slave( audpModbus, 160 );
-    ret = modbus_read_registers(audpModbus, 12, number, dest16);
-    QByteArray ba((const char *)dest, 8);
-    double b = byteArray2Double(ba);
-    qDebug() << QObject::tr("ret = %1, dest16 = %2").arg(number).arg(b, 0, 'f');
+    ret = modbus_read_registers32(audpModbus, 3, number, dest32);
+    QByteArray ba((const char *)dest, 4);
+    qDebug() << ba.toHex(' ').constData();
+    double b = byteArray2Float(ba);
+    qDebug() << QObject::tr("ret = %1, dest32 = %2").arg(number).arg(b, 0, 'f');
+
+    modbus_close(audpModbus);
+    modbus_free(audpModbus);
+}
+
+// 0000   00 00 00 00 00 06 00 05 00 01 ff 00
+static void testUTRelay()
+{
+    modbus_t *audpModbus = NULL;
+    int ret;
+
+    audpModbus = modbus_new_tcp("192.168.10.202", 10000);
+    modbus_set_debug(audpModbus, true);
+    if( modbus_connect( audpModbus ) == -1 )
+    {
+        qDebug() << "modbus_connect fail";
+        free(audpModbus);
+    }
+    modbus_set_slave( audpModbus, 0 );
+    ret = modbus_write_bit(audpModbus, 0, 1);
+
+    modbus_close(audpModbus);
+    modbus_free(audpModbus);
+}
+
+static void testUnitFunctions()
+{
+    testUTEload();
+    testUTRelay();
 }
 
 MainWindow::MainWindow( QWidget * _parent ) :
